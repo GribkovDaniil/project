@@ -1,0 +1,812 @@
+# ============================================================================
+# BLACKJACK NEURAL NETWORK STRATEGY - ПОЛНЫЙ КОД ДЛЯ GOOGLE COLAB
+# ============================================================================
+# Система обучения оптимальной стратегии Blackjack с использованием
+# глубокой нейронной сети на TensorFlow и Q-Learning
+
+# Установка необходимых библиотек
+import subprocess
+import sys
+
+print("📦 Установка зависимостей...")
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "tensorflow>=2.10.0"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "numpy"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "matplotlib"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "seaborn"])
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pandas"])
+print("✓ Зависимости установлены!\n")
+
+# ============================================================================
+# ИМПОРТЫ
+# ============================================================================
+
+import numpy as np
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import random
+from collections import deque, defaultdict
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+from datetime import datetime
+import json
+import os
+
+# Установка seed для воспроизводимости результатов
+np.random.seed(42)
+tf.random.set_seed(42)
+random.seed(42)
+
+print("=" * 80)
+print(" 🎰 BLACKJACK NEURAL NETWORK STRATEGY SYSTEM")
+print(" Система обучения оптимальной стратегии игры Blackjack")
+print("=" * 80)
+print()
+
+# ============================================================================
+# КЛАСС: Симулятор игры Blackjack
+# ============================================================================
+
+class BlackjackGame:
+    """
+    Симулятор классической игры Blackjack.
+    Используется для создания обучающих данных для нейронной сети.
+    """
+
+    def __init__(self, num_decks=1):
+        """
+        Инициализация игры.
+
+        Args:
+            num_decks: Количество используемых колод (1-8)
+        """
+        self.num_decks = num_decks
+        self.reset_deck()
+
+    def reset_deck(self):
+        """Инициализация/переиницializация колоды карт."""
+        # Стандартная колода: 13 карт * 4 масти
+        deck = [2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 10, 10, 11] * 4 * self.num_decks
+        self.deck = deck
+        random.shuffle(self.deck)
+
+    def deal_card(self):
+        """Раздача карты из колоды."""
+        if len(self.deck) < 10:
+            self.reset_deck()
+        return self.deck.pop()
+
+    def calculate_hand_value(self, hand):
+        """
+        Расчёт стоимости руки с учётом правила туза.
+
+        Returns:
+            tuple: (value, has_usable_ace)
+        """
+        total = sum(hand)
+        aces = hand.count(11)
+
+        # Если сумма больше 21, пересчитываем тузы
+        while total > 21 and aces > 0:
+            total -= 10  # Туз 11 становится 1
+            aces -= 1
+
+        has_usable_ace = (aces > 0 and total + 10 <= 21)
+        return total, has_usable_ace
+
+    def play_game(self, agent_strategy=None, use_basic_strategy=False):
+        """
+        Проведение одной игры Blackjack.
+
+        Args:
+            agent_strategy: Функция, которая возвращает действие (0=Stand, 1=Hit)
+            use_basic_strategy: Использовать ли базовую стратегию Blackjack
+
+        Returns:
+            dict: Информация об игре (результат, действия, состояния, вознаграждение)
+        """
+        # Раздача начальных карт
+        player_hand = [self.deal_card(), self.deal_card()]
+        dealer_hand = [self.deal_card(), self.deal_card()]
+
+        game_history = []
+
+        # Ход игрока
+        while True:
+            player_value, player_ace = self.calculate_hand_value(player_hand)
+            dealer_showing = dealer_hand[0]
+
+            # Если рука > 21, игрок перебрал
+            if player_value > 21:
+                return {
+                    'result': 'BUST',
+                    'reward': -1,
+                    'player_final': player_value,
+                    'dealer_final': None,
+                    'history': game_history
+                }
+
+            # Определить действие
+            if agent_strategy is None:
+                # Случайная стратегия
+                action = random.choice([0, 1])
+            elif use_basic_strategy:
+                action = self.get_basic_strategy_action(player_value, dealer_showing, player_ace)
+            else:
+                # Стратегия агента
+                state = (player_value, dealer_showing, player_ace)
+                action = agent_strategy(state)
+
+            # Сохранить состояние
+            state = (player_value, dealer_showing, player_ace)
+            game_history.append((state, action))
+
+            # Если игрок выбрал Stand
+            if action == 0:
+                break
+
+            # Иначе взять карту
+            player_hand.append(self.deal_card())
+
+        # Ход дилера (дилер должен взять карту если < 17)
+        while True:
+            dealer_value, _ = self.calculate_hand_value(dealer_hand)
+            if dealer_value >= 17:
+                break
+            dealer_hand.append(self.deal_card())
+
+        # Расчёт результата
+        player_final, _ = self.calculate_hand_value(player_hand)
+        dealer_final, _ = self.calculate_hand_value(dealer_hand)
+
+        # Определить победителя
+        if dealer_final > 21:
+            result = 'WIN'
+            reward = 1
+        elif player_final > dealer_final:
+            result = 'WIN'
+            reward = 1
+        elif player_final == dealer_final:
+            result = 'DRAW'
+            reward = 0
+        else:
+            result = 'LOSS'
+            reward = -1
+
+        return {
+            'result': result,
+            'reward': reward,
+            'player_final': player_final,
+            'dealer_final': dealer_final,
+            'history': game_history
+        }
+
+    @staticmethod
+    def get_basic_strategy_action(player_value, dealer_card, has_usable_ace):
+        """
+        Базовая математически оптимальная стратегия Blackjack.
+        Используется как бенчмарк для сравнения.
+        """
+        # Базовая стратегия (упрощённая версия)
+        if has_usable_ace:
+            # Мягкая рука
+            if player_value < 15:
+                return 1  # HIT
+            elif player_value == 15:
+                return 1 if dealer_card >= 4 else 0
+            elif player_value == 16:
+                return 1 if dealer_card >= 4 else 0
+            elif player_value == 17:
+                return 1 if dealer_card in [2, 3, 4, 5, 6] else 0
+            elif player_value == 18:
+                return 0  # STAND
+            else:
+                return 0  # STAND
+        else:
+            # Жёсткая рука
+            if player_value <= 11:
+                return 1  # HIT
+            elif player_value == 12:
+                return 1 if dealer_card in [2, 3, 7, 8, 9, 10, 11] else 0
+            elif player_value in [13, 14, 15, 16]:
+                return 1 if dealer_card in [7, 8, 9, 10, 11] else 0
+            else:
+                return 0  # STAND
+
+# ============================================================================
+# КЛАСС: Q-Learning Agent с Deep Neural Network
+# ============================================================================
+
+class DeepQAgent:
+    """
+    Агент Q-Learning с глубокой нейронной сетью.
+    Изучает оптимальную стратегию Blackjack на основе опыта игры.
+    """
+
+    def __init__(self,
+                 input_size=3,
+                 hidden1=128,
+                 hidden2=64,
+                 output_size=2,
+                 activation='relu',
+                 dropout_rate=0.2,
+                 learning_rate=0.001,
+                 optimizer='adam',
+                 loss_function='mse'):
+        """
+        Инициализация агента.
+
+        Args:
+            input_size: Размер входного слоя (3 параметра состояния)
+            hidden1: Размер первого скрытого слоя
+            hidden2: Размер второго скрытого слоя
+            output_size: Размер выходного слоя (2 действия)
+            activation: Функция активации скрытых слоёв
+            dropout_rate: Коэффициент dropout для регуляризации
+            learning_rate: Скорость обучения
+            optimizer: Оптимизатор (adam, rmsprop, sgd)
+            loss_function: Функция потерь (mse, mae)
+        """
+        self.input_size = input_size
+        self.output_size = output_size
+        self.learning_rate = learning_rate
+        self.epsilon = 1.0  # Коэффициент исследования
+        self.epsilon_decay = 0.995
+        self.epsilon_min = 0.01
+        self.gamma = 0.95  # Коэффициент дисконтирования
+        self.memory = deque(maxlen=2000)  # Память для Replay Buffer
+        self.q_values_history = defaultdict(lambda: [0, 0])  # Табличное хранилище Q-значений
+
+        # Создание нейронной сети
+        self.model = self._build_model(
+            input_size, hidden1, hidden2, output_size,
+            activation, dropout_rate, learning_rate, optimizer, loss_function
+        )
+
+        print(f"✓ Deep Q-Network создана:")
+        print(f"  - Входной слой: {input_size} нейронов")
+        print(f"  - Скрытый слой 1: {hidden1} нейронов ({activation})")
+        print(f"  - Скрытый слой 2: {hidden2} нейронов ({activation})")
+        print(f"  - Выходной слой: {output_size} нейронов (Q-values)")
+        print(f"  - Optimizer: {optimizer}, Learning Rate: {learning_rate}")
+        print(f"  - Dropout Rate: {dropout_rate}")
+        print()
+
+    def _build_model(self, input_size, hidden1, hidden2, output_size,
+                     activation, dropout_rate, lr, optimizer, loss_fn):
+        """Построение нейронной сети."""
+        model = keras.Sequential([
+            layers.Input(shape=(input_size,)),
+
+            # Первый слой
+            layers.Dense(hidden1, activation=activation,
+                        kernel_regularizer=keras.regularizers.l2(0.001),
+                        name='dense_1'),
+            layers.Dropout(dropout_rate),
+            layers.BatchNormalization(),
+
+            # Второй слой
+            layers.Dense(hidden2, activation=activation,
+                        kernel_regularizer=keras.regularizers.l2(0.001),
+                        name='dense_2'),
+            layers.Dropout(dropout_rate),
+            layers.BatchNormalization(),
+
+            # Выходной слой
+            layers.Dense(output_size, activation='linear', name='q_values')
+        ])
+
+        # Компиляция модели
+        if optimizer.lower() == 'adam':
+            opt = keras.optimizers.Adam(learning_rate=lr)
+        elif optimizer.lower() == 'rmsprop':
+            opt = keras.optimizers.RMSprop(learning_rate=lr)
+        else:
+            opt = keras.optimizers.SGD(learning_rate=lr)
+
+        if loss_fn.lower() == 'mse':
+            loss = 'mse'
+        else:
+            loss = 'mae'
+
+        model.compile(optimizer=opt, loss=loss, metrics=['mae'])
+
+        return model
+
+    def encode_state(self, state):
+        """Преобразование состояния в массив для нейросети."""
+        player_value, dealer_card, has_usable_ace = state
+        # Нормализация значений
+        return np.array([
+            (player_value - 12) / 9,  # Нормализация 12-21 в 0-1
+            (dealer_card - 1) / 10,   # Нормализация 1-10 в 0-1
+            float(has_usable_ace)     # 0 или 1
+        ])
+
+    def select_action(self, state, training=True):
+        """
+        Выбор действия с использованием epsilon-greedy стратегии.
+
+        Args:
+            state: Текущее состояние игры
+            training: Режим обучения (True) или тестирования (False)
+
+        Returns:
+            int: Номер действия (0=Stand, 1=Hit)
+        """
+        # В режиме тестирования всегда выбираем оптимальное действие
+        if not training:
+            return self.get_best_action(state)
+
+        # Epsilon-greedy исследование
+        if random.random() < self.epsilon:
+            return random.choice([0, 1])
+        else:
+            return self.get_best_action(state)
+
+    def get_best_action(self, state):
+        """Выбор лучшего действия на основе Q-значений."""
+        encoded = self.encode_state(state)
+        encoded = np.reshape(encoded, [1, self.input_size])
+        q_values = self.model.predict(encoded, verbose=0)
+        return np.argmax(q_values[0])
+
+    def remember(self, state, action, reward, next_state, done):
+        """Сохранение опыта в память для обучения."""
+        self.memory.append((state, action, reward, next_state, done))
+
+    def replay(self, batch_size):
+        """
+        Обучение на батче из памяти (Experience Replay).
+
+        Args:
+            batch_size: Размер батча для обучения
+
+        Returns:
+            float: Средняя потеря на батче
+        """
+        if len(self.memory) < batch_size:
+            batch_size = len(self.memory)
+
+        batch = random.sample(self.memory, batch_size)
+
+        states = np.array([self.encode_state(x[0]) for x in batch])
+        actions = np.array([x[1] for x in batch])
+        rewards = np.array([x[2] for x in batch])
+        next_states = np.array([self.encode_state(x[3]) for x in batch])
+        dones = np.array([x[4] for x in batch])
+
+        # Расчёт target Q-values
+        target_q_values = self.model.predict(states, verbose=0)
+        next_q_values = self.model.predict(next_states, verbose=0)
+
+        for i in range(batch_size):
+            if dones[i]:
+                target_q_values[i][actions[i]] = rewards[i]
+            else:
+                target_q_values[i][actions[i]] = rewards[i] + self.gamma * np.max(next_q_values[i])
+
+        # Обучение модели и получение loss
+        history = self.model.train_on_batch(states, target_q_values)
+
+        # history это список [loss, metrics], берём первый элемент
+        return history if isinstance(history, (int, float)) else history[0]
+
+    def decay_epsilon(self):
+        """Снижение коэффициента исследования."""
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+
+# ============================================================================
+# КЛАСС: Управление обучением и статистикой
+# ============================================================================
+
+class BlackjackTrainer:
+    """Управление процессом обучения и сбор статистики."""
+
+    def __init__(self, agent, num_epochs=100, num_games=2000, batch_size=32):
+        """
+        Args:
+            agent: Экземпляр DeepQAgent
+            num_epochs: Количество эпох обучения
+            num_games: Количество игр на эпоху
+            batch_size: Размер батча для обучения
+        """
+        self.agent = agent
+        self.num_epochs = num_epochs
+        self.num_games = num_games
+        self.batch_size = batch_size
+
+        self.history = {
+            'epoch': [],
+            'loss': [],
+            'epsilon': [],
+            'win_rate': [],
+            'avg_reward': []
+        }
+
+    def train(self):
+        """Основной цикл обучения."""
+        game = BlackjackGame(num_decks=1)
+
+        print("🎮 Запуск обучения модели...")
+        print(f"   Эпох: {self.num_epochs} | Игр на эпоху: {self.num_games}")
+        print(f"   Batch size: {self.batch_size}\n")
+
+        for epoch in range(self.num_epochs):
+            epoch_loss = 0.0
+            loss_count = 0
+            wins = 0
+            total_reward = 0
+
+            # Тренировка на серии игр
+            for game_num in range(self.num_games):
+                # Стратегия агента
+                def strategy(state):
+                    return self.agent.select_action(state, training=True)
+
+                # Играем игру
+                result = game.play_game(agent_strategy=strategy)
+                reward = result['reward']
+
+                # Учим модель на каждом шаге
+                for i, (state, action) in enumerate(result['history']):
+                    # Следующее состояние или терминальное
+                    if i < len(result['history']) - 1:
+                        next_state = result['history'][i + 1][0]
+                        done = False
+                    else:
+                        next_state = state  # Финальное состояние
+                        done = True
+
+                    self.agent.remember(state, action, reward, next_state, done)
+
+                # Обучение на батче
+                if len(self.agent.memory) > self.batch_size:
+                    loss = self.agent.replay(self.batch_size)
+                    epoch_loss += loss
+                    loss_count += 1
+
+                # Статистика
+                if result['reward'] == 1:
+                    wins += 1
+                total_reward += result['reward']
+
+            # Снижение epsilon
+            self.agent.decay_epsilon()
+
+            # Сохранение истории
+            win_rate = (wins / self.num_games) * 100
+            avg_reward = total_reward / self.num_games
+            avg_loss = epoch_loss / loss_count if loss_count > 0 else 0
+
+            self.history['epoch'].append(epoch + 1)
+            self.history['loss'].append(avg_loss)
+            self.history['epsilon'].append(self.agent.epsilon)
+            self.history['win_rate'].append(win_rate)
+            self.history['avg_reward'].append(avg_reward)
+
+            # Вывод прогресса
+            if (epoch + 1) % max(1, self.num_epochs // 10) == 0 or epoch == 0:
+                print(f"Эпоха {epoch + 1}/{self.num_epochs} | "
+                      f"Loss: {avg_loss:.4f} | "
+                      f"Win Rate: {win_rate:.2f}% | "
+                      f"Epsilon: {self.agent.epsilon:.4f}")
+
+        print("\n✓ Обучение завершено!\n")
+        return self.history
+
+    def evaluate(self, num_games=1000):
+        """Оценка модели на тестовых играх."""
+        game = BlackjackGame(num_decks=1)
+
+        results = {
+            'wins': 0,
+            'losses': 0,
+            'draws': 0,
+            'total_reward': 0
+        }
+
+        print(f"🧪 Оценка модели на {num_games} игр...")
+
+        for _ in range(num_games):
+            def strategy(state):
+                return self.agent.select_action(state, training=False)
+
+            result = game.play_game(agent_strategy=strategy)
+
+            if result['result'] == 'WIN':
+                results['wins'] += 1
+            elif result['result'] == 'LOSS':
+                results['losses'] += 1
+            else:
+                results['draws'] += 1
+
+            results['total_reward'] += result['reward']
+
+        # Расчёт метрик
+        win_rate = (results['wins'] / num_games) * 100
+        loss_rate = (results['losses'] / num_games) * 100
+        draw_rate = (results['draws'] / num_games) * 100
+        avg_reward = results['total_reward'] / num_games
+
+        print(f"   Победы: {results['wins']} ({win_rate:.2f}%)")
+        print(f"   Поражения: {results['losses']} ({loss_rate:.2f}%)")
+        print(f"   Ничьи: {results['draws']} ({draw_rate:.2f}%)")
+        print(f"   Средний выигрыш: {avg_reward:.4f}\n")
+
+        return results
+
+# ============================================================================
+# ФУНКЦИИ ВИЗУАЛИЗАЦИИ
+# ============================================================================
+
+def plot_training_history(history):
+    """Визуализация истории обучения."""
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('История обучения Deep Q-Network Blackjack', fontsize=16, fontweight='bold')
+
+    # Loss
+    axes[0, 0].plot(history['epoch'], history['loss'], 'b-', linewidth=2)
+    axes[0, 0].set_title('Loss по эпохам', fontsize=12, fontweight='bold')
+    axes[0, 0].set_xlabel('Эпоха')
+    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # Win Rate
+    axes[0, 1].plot(history['epoch'], history['win_rate'], 'g-', linewidth=2)
+    axes[0, 1].set_title('Процент побед по эпохам', fontsize=12, fontweight='bold')
+    axes[0, 1].set_xlabel('Эпоха')
+    axes[0, 1].set_ylabel('Win Rate (%)')
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].axhline(y=48.5, color='r', linestyle='--', label='Базовая стратегия')
+    axes[0, 1].legend()
+
+    # Epsilon Decay
+    axes[1, 0].plot(history['epoch'], history['epsilon'], 'r-', linewidth=2)
+    axes[1, 0].set_title('Decay коэффициента исследования', fontsize=12, fontweight='bold')
+    axes[1, 0].set_xlabel('Эпоха')
+    axes[1, 0].set_ylabel('Epsilon')
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # Average Reward
+    axes[1, 1].plot(history['epoch'], history['avg_reward'], 'm-', linewidth=2)
+    axes[1, 1].set_title('Средний выигрыш по эпохам', fontsize=12, fontweight='bold')
+    axes[1, 1].set_xlabel('Эпоха')
+    axes[1, 1].set_ylabel('Average Reward')
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].axhline(y=0, color='k', linestyle='-', alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+def create_strategy_table(agent):
+    """Создание таблицы оптимальной стратегии."""
+    dealer_cards = list(range(1, 11))
+    player_sums = list(range(5, 22))
+
+    # Таблица без мягкого туза (Hard hands)
+    strategy_hard = np.zeros((len(player_sums), len(dealer_cards)), dtype=int)
+
+    for i, player_sum in enumerate(player_sums):
+        for j, dealer_card in enumerate(dealer_cards):
+            state = (player_sum, dealer_card, False)
+            action = agent.get_best_action(state)
+            strategy_hard[i, j] = action
+
+    # Таблица с мягким тузом (Soft hands)
+    strategy_soft = np.zeros((8, len(dealer_cards)), dtype=int)
+
+    for i, player_sum in enumerate(range(13, 21)):
+        for j, dealer_card in enumerate(dealer_cards):
+            state = (player_sum, dealer_card, True)
+            action = agent.get_best_action(state)
+            strategy_soft[i, j] = action
+
+    # Визуализация
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    fig.suptitle('Оптимальная стратегия Blackjack', fontsize=16, fontweight='bold')
+
+    # Hard hands
+    sns.heatmap(strategy_hard, annot=True, fmt='d', cmap='RdYlGn',
+                xticklabels=['A', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
+                yticklabels=[f'{s}' for s in player_sums],
+                cbar_kws={'label': '0=Stand, 1=Hit'}, ax=axes[0])
+    axes[0].set_title('Жёсткие руки (Hard Hands)', fontsize=12, fontweight='bold')
+    axes[0].set_xlabel('Открытая карта дилера')
+    axes[0].set_ylabel('Сумма карт игрока')
+
+    # Soft hands
+    sns.heatmap(strategy_soft, annot=True, fmt='d', cmap='RdYlGn',
+                xticklabels=['A', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
+                yticklabels=[f'Мягкая {s}' for s in range(13, 21)],
+                cbar_kws={'label': '0=Stand, 1=Hit'}, ax=axes[1])
+    axes[1].set_title('Мягкие руки (Soft Hands)', fontsize=12, fontweight='bold')
+    axes[1].set_xlabel('Открытая карта дилера')
+    axes[1].set_ylabel('Сумма карт игрока')
+
+    plt.tight_layout()
+    plt.show()
+
+    return strategy_hard, strategy_soft
+
+def compare_strategies(agent, num_games=1000):
+    """Сравнение стратегии агента с базовой стратегией."""
+    game = BlackjackGame(num_decks=1)
+
+    # Результаты агента
+    agent_wins = 0
+    agent_losses = 0
+    agent_draws = 0
+
+    # Результаты базовой стратегии
+    basic_wins = 0
+    basic_losses = 0
+    basic_draws = 0
+
+    print(f"🔄 Сравнение стратегий на {num_games} играх...")
+
+    for _ in range(num_games):
+        # Игра с агентом
+        def agent_strategy(state):
+            return agent.select_action(state, training=False)
+
+        agent_result = game.play_game(agent_strategy=agent_strategy)
+
+        # Игра с базовой стратегией
+        basic_result = game.play_game(use_basic_strategy=True)
+
+        # Подсчёт результатов
+        if agent_result['result'] == 'WIN':
+            agent_wins += 1
+        elif agent_result['result'] == 'LOSS':
+            agent_losses += 1
+        else:
+            agent_draws += 1
+
+        if basic_result['result'] == 'WIN':
+            basic_wins += 1
+        elif basic_result['result'] == 'LOSS':
+            basic_losses += 1
+        else:
+            basic_draws += 1
+
+    # Визуализация
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle('Сравнение стратегий', fontsize=14, fontweight='bold')
+
+    # Результаты агента
+    agent_results = [agent_wins, agent_losses, agent_draws]
+    axes[0].bar(['Победы', 'Поражения', 'Ничьи'], agent_results, color=['green', 'red', 'gray'])
+    axes[0].set_title(f'Deep Q-Network Agent\nWin Rate: {agent_wins/num_games*100:.2f}%', fontweight='bold')
+    axes[0].set_ylabel('Количество игр')
+
+    # Результаты базовой стратегии
+    basic_results = [basic_wins, basic_losses, basic_draws]
+    axes[1].bar(['Победы', 'Поражения', 'Ничьи'], basic_results, color=['green', 'red', 'gray'])
+    axes[1].set_title(f'Basic Strategy\nWin Rate: {basic_wins/num_games*100:.2f}%', fontweight='bold')
+    axes[1].set_ylabel('Количество игр')
+
+    plt.tight_layout()
+    plt.show()
+
+# ============================================================================
+# ОСНОВНОЙ КОД ВЫПОЛНЕНИЯ
+# ============================================================================
+
+def main():
+    """Главная функция программы."""
+
+    print("\n" + "=" * 80)
+    print(" ПАРАМЕТРЫ КОНФИГУРАЦИИ СИСТЕМЫ")
+    print("=" * 80 + "\n")
+
+    # ========== ПАРАМЕТРЫ МОДЕЛИ ==========
+    print("🧠 ПАРАМЕТРЫ НЕЙРОННОЙ СЕТИ:")
+    INPUT_SIZE = 3           # Входные параметры состояния
+    HIDDEN_LAYER_1 = 128     # Первый скрытый слой
+    HIDDEN_LAYER_2 = 64      # Второй скрытый слой
+    OUTPUT_SIZE = 2          # Выходные действия (Stand/Hit)
+    ACTIVATION = 'relu'      # Функция активации
+    DROPOUT_RATE = 0.2       # Коэффициент dropout
+
+    print(f"  Input Size: {INPUT_SIZE}")
+    print(f"  Hidden Layer 1: {HIDDEN_LAYER_1}")
+    print(f"  Hidden Layer 2: {HIDDEN_LAYER_2}")
+    print(f"  Output Size: {OUTPUT_SIZE}")
+    print(f"  Activation: {ACTIVATION}")
+    print(f"  Dropout: {DROPOUT_RATE}\n")
+
+    # ========== ПАРАМЕТРЫ ОБУЧЕНИЯ ==========
+    print("📚 ПАРАМЕТРЫ ОБУЧЕНИЯ:")
+    LEARNING_RATE = 0.001    # Скорость обучения
+    BATCH_SIZE = 32          # Размер батча
+    NUM_EPOCHS = 100          # Количество эпох
+    GAMES_PER_EPOCH = 100    # Количество игр на эпоху
+    DISCOUNT_FACTOR = 0.95   # Коэффициент дисконтирования
+    OPTIMIZER = 'adam'       # Оптимизатор
+    LOSS_FUNCTION = 'mse'    # Функция потерь
+
+    print(f"  Learning Rate: {LEARNING_RATE}")
+    print(f"  Batch Size: {BATCH_SIZE}")
+    print(f"  Epochs: {NUM_EPOCHS}")
+    print(f"  Games per Epoch: {GAMES_PER_EPOCH}")
+    print(f"  Discount Factor: {DISCOUNT_FACTOR}")
+    print(f"  Optimizer: {OPTIMIZER}")
+    print(f"  Loss Function: {LOSS_FUNCTION}\n")
+
+    # ========== ПАРАМЕТРЫ ИГРЫ ==========
+    print("🎰 ПАРАМЕТРЫ ИГРЫ:")
+    DECK_SIZE = 1            # Количество колод
+    TRAIN_GAMES = 2500       # Игры для финального тестирования
+    TEST_GAMES = 2500   # Тестовые игры
+
+    print(f"  Deck Size: {DECK_SIZE}")
+    print(f"  Train Games: {TRAIN_GAMES}")
+    print(f"  Test Games: {TEST_GAMES}\n")
+
+    print("=" * 80 + "\n")
+
+    # Создание агента
+    agent = DeepQAgent(
+        input_size=INPUT_SIZE,
+        hidden1=HIDDEN_LAYER_1,
+        hidden2=HIDDEN_LAYER_2,
+        output_size=OUTPUT_SIZE,
+        activation=ACTIVATION,
+        dropout_rate=DROPOUT_RATE,
+        learning_rate=LEARNING_RATE,
+        optimizer=OPTIMIZER,
+        loss_function=LOSS_FUNCTION
+    )
+
+    # Создание тренера
+    trainer = BlackjackTrainer(
+        agent=agent,
+        num_epochs=NUM_EPOCHS,
+        num_games=GAMES_PER_EPOCH,
+        batch_size=BATCH_SIZE
+    )
+
+    # Обучение модели
+    history = trainer.train()
+
+    # Оценка модели
+    print("=" * 80)
+    print(" РЕЗУЛЬТАТЫ ОЦЕНКИ")
+    print("=" * 80 + "\n")
+    results = trainer.evaluate(num_games=TEST_GAMES)
+
+    # Визуализация результатов
+    print("\n📊 Построение графиков...")
+    plot_training_history(history)
+    create_strategy_table(agent)
+    compare_strategies(agent, num_games=TRAIN_GAMES)
+
+    # Итоговая статистика
+    print("\n" + "=" * 80)
+    print(" ИТОГОВАЯ СТАТИСТИКА")
+    print("=" * 80)
+    print(f"✓ Система успешно обучена!")
+    print(f"  Эпох: {NUM_EPOCHS}")
+    print(f"  Всего игр: {NUM_EPOCHS * GAMES_PER_EPOCH}")
+    print(f"  Win Rate: {results['wins']/TEST_GAMES*100:.2f}%")
+    print(f"  Loss Rate: {results['losses']/TEST_GAMES*100:.2f}%")
+    print(f"  Draw Rate: {results['draws']/TEST_GAMES*100:.2f}%")
+    print("=" * 80 + "\n")
+
+    return agent, trainer, history
+
+# ============================================================================
+# ЗАПУСК ПРОГРАММЫ
+# ============================================================================
+
+if __name__ == "__main__":
+    # Запуск обучения
+    agent, trainer, history = main()
+
+    print("\n✓ Программа завершена успешно!")
+    print("  Модель готова к использованию.")
+    print("  Вы можете использовать 'agent.select_action(state, training=False)'")
+    print("  для получения рекомендуемого действия в любом состоянии игры.")
